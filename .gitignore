@@ -1,0 +1,45 @@
+# Python related
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment directories
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.spec
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Environments and secrets
+.env
+.env.*
+credentials.json
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/project files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary files
+*.tmp
+
+# Misc
+*.bak
+*.swp
