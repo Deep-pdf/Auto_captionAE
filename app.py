@@ -120,6 +120,21 @@ def save_config(config: dict):
         pass
 
 
+def normalize_compute_choice(choice: str, gpu_available: bool) -> str:
+    choice = (choice or "").strip().lower()
+    if choice == "gpu" and gpu_available:
+        return "GPU"
+    if choice == "cpu":
+        return "CPU"
+    return "Auto"
+
+
+def resolve_device(selection: str, gpu_available: bool) -> str:
+    if selection == "GPU" and gpu_available:
+        return "cuda"
+    return "cpu"
+
+
 def contains_devanagari(text: str) -> bool:
     return bool(re.search(r"[\u0900-\u097F]", text))
 
@@ -147,7 +162,10 @@ class AutoCaptionApp:
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.config = load_config()
-        self.compute_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.gpu_available = torch.cuda.is_available()
+        self.gpu_name = torch.cuda.get_device_name(0) if self.gpu_available else None
+        self.compute_choice = normalize_compute_choice(self.config.get("compute_device", "Auto"), self.gpu_available)
+        self.compute_device = resolve_device(self.compute_choice, self.gpu_available)
 
         # check ffmpeg availability early
         if not self._ffmpeg_available():
@@ -203,6 +221,21 @@ class AutoCaptionApp:
         self.model_menu.pack(side="left")
         self.model_var.trace_add("write", self._on_model_change)
 
+        # compute device selector
+        compute_values = ["Auto", "CPU"]
+        if self.gpu_available:
+            compute_values.append("GPU")
+        saved_compute_choice = normalize_compute_choice(self.config.get("compute_device", "Auto"), self.gpu_available)
+        self.compute_var = ctk.StringVar(value=saved_compute_choice)
+        ctk.CTkLabel(model_frame, text="Compute:").pack(side="left", padx=(15, 5))
+        self.compute_menu = ctk.CTkOptionMenu(
+            model_frame,
+            values=compute_values,
+            variable=self.compute_var,
+            command=self._on_compute_change,
+        )
+        self.compute_menu.pack(side="left")
+
         # output script selector
         saved_output_script = self.config.get("output_script", "Auto")
         if saved_output_script not in OUTPUT_SCRIPT_OPTIONS:
@@ -218,8 +251,7 @@ class AutoCaptionApp:
         self.output_script_menu.pack(side="left")
 
         # compute device indicator
-        device_text = "Running on GPU" if self.compute_device == "cuda" else "Running on CPU"
-        self.device_label = ctk.CTkLabel(frame, text=device_text, text_color="#9ad0ff")
+        self.device_label = ctk.CTkLabel(frame, text=self._get_device_text(), text_color="#9ad0ff")
         self.device_label.pack(pady=(5, 10))
 
         # start button
@@ -271,12 +303,36 @@ class AutoCaptionApp:
         self.config["model"] = self.model_var.get()
         save_config(self.config)
 
+    def _on_compute_change(self, selection):
+        self.compute_choice = normalize_compute_choice(selection, self.gpu_available)
+        self.compute_device = resolve_device(self.compute_choice, self.gpu_available)
+        self.config["compute_device"] = self.compute_choice
+        save_config(self.config)
+        self._update_device_label()
+
+    def _get_device_text(self):
+        if self.compute_choice == "Auto":
+            if self.gpu_available:
+                return f"Compute: Auto → GPU ({self.gpu_name})"
+            return "Compute: Auto → CPU (no GPU detected)"
+        if self.compute_choice == "GPU":
+            if self.gpu_available:
+                return f"Compute: GPU ({self.gpu_name})"
+            return "Compute: GPU selected but not available, using CPU"
+        return "Compute: CPU"
+
+    def _update_device_label(self):
+        self.device_label.configure(text=self._get_device_text())
+
     def _process_file(self):
         audio_path = None
         segment_audio_paths = []
         try:
             ensure_standard_streams()
             self._update_status("Loading model... (10%)", 0.1)
+            self.compute_choice = normalize_compute_choice(self.compute_var.get(), self.gpu_available)
+            self.compute_device = resolve_device(self.compute_choice, self.gpu_available)
+            self._update_device_label()
             model_name = self.model_var.get()
             model = whisper.load_model(model_name, device=self.compute_device)
             selected_output_script = self.output_script_var.get()

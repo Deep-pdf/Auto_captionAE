@@ -1,4 +1,5 @@
 {
-  "model": "medium",
-  "output_script": "English (Transliteration)"
+  "model": "large",
+  "output_script": "English (Transliteration)",
+  "compute_device": "GPU"
 }
