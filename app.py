@@ -6,12 +6,33 @@ import json
 import re
 import importlib
 
-import whisper
-import ffmpeg
-import torch
-import customtkinter as ctk
-from tkinter import messagebox
-from tkinterdnd2 import DND_FILES, TkinterDnD
+try:
+    import whisper
+except Exception:
+    whisper = None
+
+try:
+    import ffmpeg
+except Exception:
+    ffmpeg = None
+
+try:
+    import torch
+except Exception:
+    torch = None
+
+try:
+    import customtkinter as ctk
+except Exception:
+    ctk = None
+
+from tkinter import Tk, messagebox
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:
+    DND_FILES = None
+    TkinterDnD = None
 
 try:
     sanscript = importlib.import_module("indic_transliteration.sanscript")
@@ -42,23 +63,41 @@ def seconds_to_srt(ts: float) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
 
-def write_srt(segments, out_path):
+def wrap_text_for_srt(text: str, words_per_line: int) -> str:
+    cleaned_text = " ".join((text or "").split())
+    if not cleaned_text or words_per_line is None or words_per_line <= 0:
+        return cleaned_text
+
+    words = cleaned_text.split()
+    if len(words) <= words_per_line:
+        return cleaned_text
+
+    wrapped_lines = []
+    for index in range(0, len(words), words_per_line):
+        wrapped_lines.append(" ".join(words[index:index + words_per_line]))
+    return "\n".join(wrapped_lines)
+
+
+def write_srt(segments, out_path, words_per_line: int = 0):
     with open(out_path, "w", encoding="utf-8") as f:
         for i, seg in enumerate(segments, start=1):
             start = seconds_to_srt(seg["start"])
             end = seconds_to_srt(seg["end"])
-            text = seg["text"].strip()
+            text = wrap_text_for_srt(seg.get("text", ""), words_per_line)
             f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
 
 
 def extract_audio(video_path: str) -> str:
     """Use ffmpeg to extract a WAV that Whisper can ingest."""
+    if ffmpeg is None:
+        raise RuntimeError("FFmpeg is not available. Please install it and restart the app.")
+
     base = os.path.splitext(video_path)[0]
     audio_path = f"{base}_temp.wav"
     # overwrite if exists
     try:
         ffmpeg.input(video_path).output(audio_path, ac=1, ar="16k", format="wav").run(overwrite_output=True)
-    except FileNotFoundError as fe:
+    except FileNotFoundError:
         # re-raise so caller can show a friendly message
         raise RuntimeError("FFmpeg executable not found. Please install FFmpeg and add it to your PATH.")
     return audio_path
@@ -66,6 +105,9 @@ def extract_audio(video_path: str) -> str:
 
 def get_media_duration(path: str) -> float:
     """Return media duration in seconds using ffprobe metadata."""
+    if ffmpeg is None:
+        return 0.0
+
     try:
         info = ffmpeg.probe(path)
         duration = info.get("format", {}).get("duration")
@@ -78,6 +120,9 @@ def get_media_duration(path: str) -> float:
 
 def extract_audio_segment(audio_path: str, start_sec: float, duration_sec: float, segment_path: str):
     """Extract a WAV segment from an existing WAV file."""
+    if ffmpeg is None:
+        raise RuntimeError("FFmpeg is not available. Please install it and restart the app.")
+
     ffmpeg.input(audio_path, ss=max(0.0, start_sec), t=max(0.0, duration_sec)).output(
         segment_path,
         ac=1,
@@ -154,16 +199,112 @@ def transliterate_segment_text(text: str, output_script: str) -> str:
     return transliterate(text, sanscript.DEVANAGARI, sanscript.ITRANS).lower()
 
 
+def split_segment_by_words(seg, current_start: float, total_duration: float, words_per_line: int, selected_output_script: str) -> list:
+    seg_start = max(current_start, current_start + float(seg["start"]))
+    seg_end = min(total_duration, current_start + float(seg["end"]))
+    
+    if seg_end <= seg_start:
+        return []
+
+    raw_text = seg.get("text", "").strip()
+    if not raw_text or words_per_line <= 0:
+        return [{
+            "start": seg_start,
+            "end": seg_end,
+            "text": transliterate_segment_text(raw_text, selected_output_script)
+        }]
+
+    words = seg.get("words", [])
+    
+    # If we have word timestamps, split based on them
+    if words:
+        sub_segments = []
+        current_words_group = []
+        for w in words:
+            w_text = w.get("word", "").strip()
+            if not w_text:
+                continue
+            
+            # Resolve absolute timestamps
+            w_start = max(seg_start, min(seg_end, current_start + float(w["start"])))
+            w_end = max(seg_start, min(seg_end, current_start + float(w["end"])))
+            
+            current_words_group.append({
+                "text": w_text,
+                "start": w_start,
+                "end": w_end
+            })
+            
+            if len(current_words_group) == words_per_line:
+                sub_text = " ".join(item["text"] for item in current_words_group)
+                sub_start = current_words_group[0]["start"]
+                sub_end = current_words_group[-1]["end"]
+                if sub_end > sub_start:
+                    sub_segments.append({
+                        "start": sub_start,
+                        "end": sub_end,
+                        "text": transliterate_segment_text(sub_text, selected_output_script)
+                    })
+                current_words_group = []
+        
+        # Handle the remaining words
+        if current_words_group:
+            sub_text = " ".join(item["text"] for item in current_words_group)
+            sub_start = current_words_group[0]["start"]
+            sub_end = current_words_group[-1]["end"]
+            if sub_end > sub_start:
+                sub_segments.append({
+                    "start": sub_start,
+                    "end": sub_end,
+                    "text": transliterate_segment_text(sub_text, selected_output_script)
+                })
+        
+        if sub_segments:
+            return sub_segments
+
+    # Fallback to linear interpolation if word timestamps are missing or empty
+    raw_words = raw_text.split()
+    if not raw_words:
+        return []
+        
+    sub_segments = []
+    num_words = len(raw_words)
+    groups = [raw_words[i:i + words_per_line] for i in range(0, num_words, words_per_line)]
+    num_groups = len(groups)
+    duration = seg_end - seg_start
+    
+    for i, gp in enumerate(groups):
+        gp_text = " ".join(gp)
+        gp_start = seg_start + (i / num_groups) * duration
+        gp_end = seg_start + ((i + 1) / num_groups) * duration
+        sub_segments.append({
+            "start": gp_start,
+            "end": gp_end,
+            "text": transliterate_segment_text(gp_text, selected_output_script)
+        })
+        
+    return sub_segments
+
+
+
 # ---------- Application GUI ----------
 
 class AutoCaptionApp:
     def __init__(self):
         ensure_standard_streams()
+        if ctk is None:
+            raise RuntimeError("CustomTkinter is required to run the GUI. Please install the requirements and try again.")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.config = load_config()
-        self.gpu_available = torch.cuda.is_available()
-        self.gpu_name = torch.cuda.get_device_name(0) if self.gpu_available else None
+        self.gpu_available = False
+        self.gpu_name = None
+        if torch is not None:
+            try:
+                self.gpu_available = torch.cuda.is_available()
+                self.gpu_name = torch.cuda.get_device_name(0) if self.gpu_available else None
+            except Exception:
+                pass
         self.compute_choice = normalize_compute_choice(self.config.get("compute_device", "Auto"), self.gpu_available)
         self.compute_device = resolve_device(self.compute_choice, self.gpu_available)
 
@@ -171,12 +312,13 @@ class AutoCaptionApp:
         if not self._ffmpeg_available():
             messagebox.showerror("Missing FFmpeg", "FFmpeg not found in PATH. Please install FFmpeg and restart the app.")
 
-        self.root = TkinterDnD.Tk()
+        self.root = TkinterDnD.Tk() if TkinterDnD is not None else Tk()
         self.root.title("AutoCaption Studio")
-        self.root.geometry("600x460")
+        self.root.geometry("700x520")
         self.root.resizable(False, False)
 
         self.video_path = None
+        self.words_per_line = self._get_words_per_line_setting()
 
         self._build_widgets()
 
@@ -205,8 +347,9 @@ class AutoCaptionApp:
             corner_radius=8,
         )
         self.drop_label.pack(pady=10)
-        self.drop_label.drop_target_register(DND_FILES)
-        self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
+        if DND_FILES is not None:
+            self.drop_label.drop_target_register(DND_FILES)
+            self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
 
         # model selector
         models = ["tiny", "base", "small", "medium", "large"]
@@ -214,10 +357,10 @@ class AutoCaptionApp:
         if saved_model not in models:
             saved_model = "base"
         self.model_var = ctk.StringVar(value=saved_model)
-        model_frame = ctk.CTkFrame(frame)
-        model_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(model_frame, text="Model:").pack(side="left", padx=(0, 5))
-        self.model_menu = ctk.CTkOptionMenu(model_frame, values=models, variable=self.model_var)
+        controls_row_1 = ctk.CTkFrame(frame)
+        controls_row_1.pack(fill="x", pady=(5, 0))
+        ctk.CTkLabel(controls_row_1, text="Model:").pack(side="left", padx=(0, 5))
+        self.model_menu = ctk.CTkOptionMenu(controls_row_1, values=models, variable=self.model_var)
         self.model_menu.pack(side="left")
         self.model_var.trace_add("write", self._on_model_change)
 
@@ -227,9 +370,9 @@ class AutoCaptionApp:
             compute_values.append("GPU")
         saved_compute_choice = normalize_compute_choice(self.config.get("compute_device", "Auto"), self.gpu_available)
         self.compute_var = ctk.StringVar(value=saved_compute_choice)
-        ctk.CTkLabel(model_frame, text="Compute:").pack(side="left", padx=(15, 5))
+        ctk.CTkLabel(controls_row_1, text="Compute:").pack(side="left", padx=(15, 5))
         self.compute_menu = ctk.CTkOptionMenu(
-            model_frame,
+            controls_row_1,
             values=compute_values,
             variable=self.compute_var,
             command=self._on_compute_change,
@@ -241,14 +384,28 @@ class AutoCaptionApp:
         if saved_output_script not in OUTPUT_SCRIPT_OPTIONS:
             saved_output_script = "Auto"
         self.output_script_var = ctk.StringVar(value=saved_output_script)
-        ctk.CTkLabel(model_frame, text="Output Script:").pack(side="left", padx=(15, 5))
+        ctk.CTkLabel(controls_row_1, text="Output Script:").pack(side="left", padx=(15, 5))
         self.output_script_menu = ctk.CTkOptionMenu(
-            model_frame,
+            controls_row_1,
             values=OUTPUT_SCRIPT_OPTIONS,
             variable=self.output_script_var,
             command=self._on_output_script_change,
         )
         self.output_script_menu.pack(side="left")
+
+        # words per line selector
+        controls_row_2 = ctk.CTkFrame(frame)
+        controls_row_2.pack(fill="x", pady=8)
+        saved_words_per_line = self.config.get("words_per_line", 8)
+        try:
+            saved_words_per_line = max(1, int(saved_words_per_line))
+        except Exception:
+            saved_words_per_line = 8
+        self.words_per_line_var = ctk.StringVar(value=str(saved_words_per_line))
+        ctk.CTkLabel(controls_row_2, text="Words/line:").pack(side="left", padx=(0, 5))
+        self.words_per_line_entry = ctk.CTkEntry(controls_row_2, width=90, textvariable=self.words_per_line_var)
+        self.words_per_line_entry.pack(side="left")
+        ctk.CTkLabel(controls_row_2, text="(applies to every subtitle line)", text_color="#9aa0a6").pack(side="left", padx=(8, 0))
 
         # compute device indicator
         self.device_label = ctk.CTkLabel(frame, text=self._get_device_text(), text_color="#9ad0ff")
@@ -286,6 +443,7 @@ class AutoCaptionApp:
     def _on_start(self):
         if not self.video_path:
             return
+        self.words_per_line = self._get_words_per_line_setting()
         # verify ffmpeg again in case PATH changed
         if not self._ffmpeg_available():
             messagebox.showerror("Missing FFmpeg", "FFmpeg not found in PATH. Please install FFmpeg and restart the app.")
@@ -293,6 +451,7 @@ class AutoCaptionApp:
         self.start_button.configure(state="disabled")
         self.model_menu.configure(state="disabled")
         self.output_script_menu.configure(state="disabled")
+        self.words_per_line_entry.configure(state="disabled")
         threading.Thread(target=self._process_file, daemon=True).start()
 
     def _on_output_script_change(self, selection):
@@ -309,6 +468,17 @@ class AutoCaptionApp:
         self.config["compute_device"] = self.compute_choice
         save_config(self.config)
         self._update_device_label()
+
+    def _get_words_per_line_setting(self) -> int:
+        raw_value = (self.words_per_line_var.get() if hasattr(self, "words_per_line_var") else "8").strip()
+        try:
+            parsed_value = int(raw_value)
+        except Exception:
+            parsed_value = 8
+        parsed_value = max(1, parsed_value)
+        self.config["words_per_line"] = parsed_value
+        save_config(self.config)
+        return parsed_value
 
     def _get_device_text(self):
         if self.compute_choice == "Auto":
@@ -333,6 +503,8 @@ class AutoCaptionApp:
             self.compute_choice = normalize_compute_choice(self.compute_var.get(), self.gpu_available)
             self.compute_device = resolve_device(self.compute_choice, self.gpu_available)
             self._update_device_label()
+            if whisper is None:
+                raise RuntimeError("Whisper is not installed. Please install the project requirements and try again.")
             model_name = self.model_var.get()
             model = whisper.load_model(model_name, device=self.compute_device)
             selected_output_script = self.output_script_var.get()
@@ -364,16 +536,17 @@ class AutoCaptionApp:
                     segment_audio_path,
                     task="transcribe",
                     condition_on_previous_text=False,
+                    word_timestamps=True,
                 )
                 for seg in result.get("segments", []):
-                    seg_start = max(current_start, current_start + float(seg["start"]))
-                    seg_end = min(total_duration, current_start + float(seg["end"]))
-                    if seg_end > seg_start:
-                        segments.append({
-                            "start": seg_start,
-                            "end": seg_end,
-                            "text": transliterate_segment_text(seg["text"], selected_output_script),
-                        })
+                    split_segs = split_segment_by_words(
+                        seg,
+                        current_start=current_start,
+                        total_duration=total_duration,
+                        words_per_line=self.words_per_line,
+                        selected_output_script=selected_output_script
+                    )
+                    segments.extend(split_segs)
 
                 current_start += current_chunk_duration
                 processed_ratio = min(1.0, current_start / total_duration) if total_duration > 0 else 1.0
@@ -396,16 +569,17 @@ class AutoCaptionApp:
                     retry_segment_audio_path,
                     task="transcribe",
                     condition_on_previous_text=False,
+                    word_timestamps=True,
                 )
                 for seg in tail_result.get("segments", []):
-                    seg_start = max(tail_start, tail_start + float(seg["start"]))
-                    seg_end = min(total_duration, tail_start + float(seg["end"]))
-                    if seg_end > seg_start:
-                        segments.append({
-                            "start": seg_start,
-                            "end": seg_end,
-                            "text": transliterate_segment_text(seg["text"], selected_output_script),
-                        })
+                    split_segs = split_segment_by_words(
+                        seg,
+                        current_start=tail_start,
+                        total_duration=total_duration,
+                        words_per_line=self.words_per_line,
+                        selected_output_script=selected_output_script
+                    )
+                    segments.extend(split_segs)
 
                 last_end = max((seg["end"] for seg in segments), default=0.0)
                 if total_duration - last_end >= min_tail_to_retry:
@@ -420,7 +594,7 @@ class AutoCaptionApp:
             self._update_status("Generating captions... (95%)", 0.95)
 
             out_srt = os.path.splitext(self.video_path)[0] + ".srt"
-            write_srt(segments, out_srt)
+            write_srt(segments, out_srt, words_per_line=self.words_per_line)
 
             self._update_status("Completed (100%)", 1.0)
             messagebox.showinfo("Done", f"Caption file created!\n\nLocation:\n{out_srt}\n\nFile size: {os.path.getsize(out_srt)} bytes")
@@ -432,6 +606,8 @@ class AutoCaptionApp:
             self.start_button.configure(state="normal")
             self.model_menu.configure(state="normal")
             self.output_script_menu.configure(state="normal")
+            if hasattr(self, "words_per_line_entry"):
+                self.words_per_line_entry.configure(state="normal")
             # remove temporary audio file if exists
             try:
                 if audio_path and os.path.exists(audio_path):
