@@ -1,6 +1,6 @@
 {
   "model": "medium",
-  "output_script": "English (Transliteration)",
+  "output_script": "Hinglish",
   "compute_device": "GPU",
   "words_per_line": 4
 }

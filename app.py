@@ -46,7 +46,7 @@ except Exception:
 
 SUPPORTED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi")
 CONFIG_FILE = "autocaption_config.json"
-OUTPUT_SCRIPT_OPTIONS = ["Auto", "English (Transliteration)"]
+OUTPUT_SCRIPT_OPTIONS = ["Auto", "Hinglish", "English (Transliteration)"]
 
 # Keep fallback stream handles alive for GUI/frozen runs where stdout/stderr may be None.
 _FALLBACK_STD_STREAMS = []
@@ -184,10 +184,156 @@ def contains_devanagari(text: str) -> bool:
     return bool(re.search(r"[\u0900-\u097F]", text))
 
 
-def transliterate_segment_text(text: str, output_script: str) -> str:
-    if output_script != "English (Transliteration)":
+HINGLISH_WORD_OVERRIDES = {
+    "हम": "hum",
+    "सब": "sab",
+    "को": "ko",
+    "एक": "ek",
+    "साथ": "sath",
+    "मैं": "main",
+    "तुम": "tum",
+    "आप": "aap",
+    "आज": "aaj",
+    "कभी": "kabhi",
+    "यह": "yeh",
+    "वह": "woh",
+    "कुछ": "kuch",
+    "है": "hai",
+    "नहीं": "nahi",
+    "हाँ": "haan",
+    "बिल्कुल": "bilkul",
+    "अच्छा": "accha",
+    "शुक्रिया": "shukriya",
+    "धन्यवाद": "dhanyavaad",
+    "दोस्त": "dost",
+    "किसी": "kisi",
+    "नमस्ते": "namaste",
+    "भाई": "bhai",
+    "बहुत": "bahut",
+    "सिर्फ": "sirf",
+    "पर": "par",
+    "मुझे": "mujhe",
+    "हमें": "hamein",
+    "तुझे": "tuje",
+    "अपना": "apna",
+    "सकते": "sakte",
+    "कर": "kar",
+    "लगे": "lage",
+    "क्यों": "kyun",
+    "क्योंकि": "kyunki",
+    "लोग": "log",
+}
+
+DEVANAGARI_TO_HINGLISH = {
+    "अ": "a",
+    "आ": "a",
+    "ा": "a",
+    "इ": "i",
+    "ि": "i",
+    "ई": "i",
+    "ी": "i",
+    "उ": "u",
+    "ु": "u",
+    "ऊ": "u",
+    "ू": "u",
+    "ऋ": "ri",
+    "ृ": "r",
+    "ॠ": "ri",
+    "ॢ": "r",
+    "ए": "e",
+    "े": "e",
+    "ऐ": "ai",
+    "ै": "ai",
+    "ओ": "o",
+    "ो": "o",
+    "औ": "au",
+    "ौ": "au",
+    "ं": "n",
+    "ँ": "n",
+    "ः": "h",
+    "़": "",
+    "्": "",
+    "क": "k",
+    "ख": "kh",
+    "ग": "g",
+    "घ": "gh",
+    "ङ": "ng",
+    "च": "ch",
+    "छ": "chh",
+    "ज": "j",
+    "झ": "jh",
+    "ञ": "ny",
+    "ट": "t",
+    "ठ": "th",
+    "ड": "d",
+    "ढ": "dh",
+    "ण": "n",
+    "त": "t",
+    "थ": "th",
+    "द": "d",
+    "ध": "dh",
+    "न": "n",
+    "प": "p",
+    "फ": "ph",
+    "ब": "b",
+    "भ": "bh",
+    "म": "m",
+    "य": "y",
+    "र": "r",
+    "ल": "l",
+    "व": "v",
+    "श": "sh",
+    "ष": "sh",
+    "स": "s",
+    "ह": "h",
+    "क्ष": "ksh",
+    "त्र": "tr",
+    "ज्ञ": "gy",
+    "श्र": "shr",
+    "ज़": "z",
+    "ड़": "r",
+    "ढ़": "rh",
+    "फ़": "f",
+    "ॐ": "om",
+}
+
+
+def romanize_hinglish_text(text: str) -> str:
+    if not text.strip() or not contains_devanagari(text):
         return text
+
+    words = text.strip().split()
+    romanized_words = []
+    for word in words:
+        if word in HINGLISH_WORD_OVERRIDES:
+            romanized_words.append(HINGLISH_WORD_OVERRIDES[word])
+            continue
+
+        candidate = ""
+        i = 0
+        while i < len(word):
+            if i + 1 < len(word) and word[i:i + 2] in DEVANAGARI_TO_HINGLISH:
+                candidate += DEVANAGARI_TO_HINGLISH[word[i:i + 2]]
+                i += 2
+                continue
+            if word[i] in DEVANAGARI_TO_HINGLISH:
+                candidate += DEVANAGARI_TO_HINGLISH[word[i]]
+            i += 1
+
+        if not candidate:
+            romanized_words.append(word)
+        else:
+            romanized_words.append(candidate.lower())
+
+    return " ".join(romanized_words)
+
+
+def transliterate_segment_text(text: str, output_script: str) -> str:
     if not text.strip():
+        return text
+    if output_script == "Hinglish":
+        return romanize_hinglish_text(text)
+    if output_script != "English (Transliteration)":
         return text
     if not contains_devanagari(text):
         return text

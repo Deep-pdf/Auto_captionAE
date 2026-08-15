@@ -1,5 +1,6 @@
 import unittest
-from app import seconds_to_srt, wrap_text_for_srt, split_segment_by_words
+
+from app import HAS_INDIC_TRANSLITERATION, seconds_to_srt, split_segment_by_words, transliterate_segment_text, wrap_text_for_srt
 
 
 class TimestampTests(unittest.TestCase):
@@ -19,6 +20,11 @@ class SubtitleWrapTests(unittest.TestCase):
 
 
 class SegmentSplitTests(unittest.TestCase):
+    def test_hinglish_output_keeps_hindi_words_in_roman_script(self):
+        if not HAS_INDIC_TRANSLITERATION:
+            self.skipTest("indic-transliteration not installed")
+        self.assertEqual(transliterate_segment_text("हम सब को एक साथ", "Hinglish"), "hum sab ko ek sath")
+
     def test_split_by_words_native(self):
         # Mock a segment with 5 words
         seg = {
